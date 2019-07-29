@@ -1,0 +1,551 @@
+680x0 MACRO ASSEMBLER   Version 5.00   (c) 1992-2005 Peter J. Fondse
+
+Date: 24 Aug 2017      Time: 02:25:15          Source: BASIC68K.ASM
+
+                       1   *************************************************************************************
+                       2   *										    *
+                       3   *	Enhanced BASIC for the Motorola MC680xx					    *
+                       4   *										    *
+                       5   *	This version is for the TS2 single board computer.		            *
+                       6   *	Jeff Tranter (tranter@pobox.com)					    *
+                       7   *										    *
+                       8   *************************************************************************************
+                       9   *										    *
+                      10   *	Copyright(C) 2002-12 by Lee Davison. This program may be freely distributed *
+                      11   *	for personal use only. All commercial rights are reserved.		    *
+                      12   *										    *
+                      13   *	More 68000 and other projects can be found on my website at ..		    *
+                      14   *										    *
+                      15   *	 http://mycorner.no-ip.org/index.html					    *
+                      16   *										    *
+                      17   *	mail : leeedavison@googlemail.com					    *
+                      18   *										    *
+                      19   *************************************************************************************
+                      20   
+                      21   * Ver 3.52
+                      22   
+                      23   * Ver 3.52 stops USING$() from reading beyond the end of the format string
+                      24   * Ver 3.51 fixes the UCASE$() and LCASE$() functions for null strings
+                      25   * Ver 3.50 unary minus in concatenate generates a type mismatch error
+                      26   * Ver 3.49 doesn't tokenise 'DEF' or 'DEC' within a hex value
+                      27   * Ver 3.48 allows scientific notation underflow in the USING$() function
+                      28   * Ver 3.47 traps the use of array elements as the FOR loop variable
+                      29   * Ver 3.46 updates function and function variable handling
+                      30   
+                      31   *************************************************************************************
+                      32   *
+                      33   * Ver 3.45 makes the handling of non existant variables consistent and gives the
+                      34   * option of not returning an error for a non existant variable. If this is the
+                      35   * behaviour you want just change novar to some non zero value
+                      36   
+          0000 0000   37   novar		EQU	0				* non existant variables cause errors
+                      38   
+                      39   
+                      40   *************************************************************************************
+                      41   
+                      42   * Ver 3.44 adds overflow indication to the USING$() function
+                      43   * Ver 3.43 removes an undocumented feature of concatenating null strings
+                      44   * Ver 3.42 reimplements backspace so that characters are overwritten with [SPACE]
+                      45   * Ver 3.41 removes undocumented features of the USING$() function
+                      46   * Ver 3.40 adds the USING$() function
+                      47   * Ver 3.33 adds the file requester to LOAD and SAVE
+                      48   * Ver 3.32 adds the optional ELSE clause to IF .. THEN
+                      49   
+                      50   *************************************************************************************
+                      51   *
+                      52   * Version 3.25 adds the option to change the behaviour of INPUT so that a null
+                      53   * response does not cause a program break. If this is the behaviour you want just
+                      54   * change nobrk to some non zero value.
+                      55   
+          0000 0000   56   nobrk		EQU	0				* null response to INPUT causes a break
+                      57   
+                      58   
+                      59   *************************************************************************************
+                      60   *
+                      61   * Version 3.xx replaces the fixed RAM addressing from previous versions with a RAM
+                      62   * pointer in a3. this means that this could now be run as a task on a multitasking
+                      63   * system where memory resources may change.
+                      64   
+                      65   
+                      66   *************************************************************************************
+                      67   
+                      68   
+                      69   	INCLUDE	"basic68k.inc"
+                      70   
+                      71   * This lot is in RAM
+                      72   
+00000000              73           ORG     0			* start of RAM
+                      74    
+00000000              75   ram_strt	ds.l	$100			* allow 1K for the stack, this should be plenty
+                      76   						* for any BASIC program that doesn't do something
+                      77   						* silly, it could even be much less.
+                      78   ram_base
+00000400              79   LAB_WARM	ds.w	1			* BASIC warm start entry point
+00000402              80   Wrmjpv	ds.l	1			* BASIC warm start jump vector
+                      81   
+00000406              82   Usrjmp	ds.w	1			* USR function JMP address
+00000408              83   Usrjpv	ds.l	1			* USR function JMP vector
+                      84   
+                      85   * system dependant i/o vectors
+                      86   * these are in RAM and are set at start-up
+                      87   
+0000040C              88   V_INPT	ds.w	1			* non halting scan input device entry point
+0000040E              89   V_INPTv	ds.l	1			* non halting scan input device jump vector
+                      90   
+00000412              91   V_OUTP	ds.w	1			* send byte to output device entry point
+00000414              92   V_OUTPv	ds.l	1			* send byte to output device jump vector
+                      93   
+00000418              94   V_LOAD	ds.w	1			* load BASIC program entry point
+0000041A              95   V_LOADv	ds.l	1			* load BASIC program jump vector
+                      96   
+0000041E              97   V_SAVE	ds.w	1			* save BASIC program entry point
+00000420              98   V_SAVEv	ds.l	1			* save BASIC program jump vector
+                      99   
+00000424             100   V_CTLC	ds.w	1			* save CTRL-C check entry point
+00000426             101   V_CTLCv	ds.l	1			* save CTRL-C check jump vector
+                     102   
+0000042A             103   Itemp		ds.l	1			* temporary integer	(for GOTO etc)
+                     104   
+0000042E             105   Smeml		ds.l	1			* start of memory		(start of program)
+                     106   
+                     107   * the program is stored as a series of lines each line having the following format
+                     108   *
+                     109   *		ds.l	1			* pointer to the next line or $00000000 if [EOT]
+                     110   *		ds.l	1			* line number
+                     111   *		ds.b	n			* program bytes
+                     112   *		dc.b	$00			* [EOL] marker, there will be a second $00 byte, if
+                     113   *						* needed, to pad the line to an even number of bytes
+                     114   
+00000432             115   Sfncl		ds.l	1			* start of functions	(end of Program)
+                     116   
+                     117   * the functions are stored as function name, function execute pointer and function
+                     118   * variable name
+                     119   *
+                     120   *		ds.l	1			* name
+                     121   *		ds.l	1			* execute pointer
+                     122   *		ds.l	1			* function variable
+                     123   
+00000436             124   Svarl		ds.l	1			* start of variables	(end of functions)
+                     125   
+                     126   * the variables are stored as variable name, variable value
+                     127   *
+                     128   *		ds.l	1			* name
+                     129   *		ds.l	1			* packed float or integer value
+                     130   
+0000043A             131   Sstrl		ds.l	1			* start of strings	(end of variables)
+                     132   
+                     133   * the strings are stored as string name, string pointer and string length
+                     134   *
+                     135   *		ds.l	1			* name
+                     136   *		ds.l	1			* string pointer
+                     137   *		ds.w	1			* string length
+                     138   
+0000043E             139   Sarryl	ds.l	1			* start of arrays		(end of strings)
+                     140   
+                     141   * the arrays are stored as array name, array size, array dimensions count, array
+                     142   * dimensions upper bounds and array elements
+                     143   *
+                     144   *		ds.l	1			* name
+                     145   *		ds.l	1			* size including this header
+                     146   *		ds.w	1			* dimensions count
+                     147   *		ds.w	1			* 1st dimension upper bound
+                     148   *		ds.w	1			* 2nd dimension upper bound
+                     149   *		...				* ...
+                     150   *		ds.w	1			* nth dimension upper bound
+                     151   *
+                     152   * then (i1+1)*(i2+1)...*(in+1) of either ..
+                     153   *
+                     154   *		ds.l	1			* packed float or integer value
+                     155   *
+                     156   * .. if float or integer, or ..
+                     157   *
+                     158   *		ds.l	1			* string pointer
+                     159   *		ds.w	1			* string length
+                     160   *
+                     161   * .. if string
+                     162   
+00000442             163   Earryl	ds.l	1			* end of arrays		(start of free mem)
+00000446             164   Sstorl	ds.l	1			* string storage		(moving down)
+0000044A             165   Ememl		ds.l	1			* end of memory		(upper bound of RAM)
+0000044E             166   Sutill	ds.l	1			* string utility ptr
+00000452             167   Clinel	ds.l	1			* current line		(Basic line number)
+00000456             168   Blinel	ds.l	1			* break line		(Basic line number)
+                     169   
+0000045A             170   Cpntrl	ds.l	1			* continue pointer
+0000045E             171   Dlinel	ds.l	1			* current DATA line
+00000462             172   Dptrl		ds.l	1			* DATA pointer
+00000466             173   Rdptrl	ds.l	1			* read pointer
+0000046A             174   Varname	ds.l	1			* current var name
+0000046E             175   Cvaral	ds.l	1			* current var address
+00000472             176   Lvarpl	ds.l	1			* variable pointer for LET and FOR/NEXT
+                     177   
+00000476             178   des_sk_e	ds.l	6			* descriptor stack end address
+                     179   des_sk					* descriptor stack start address
+                     180   						* use a4 for the descriptor pointer
+0000048E             181   		ds.w	1			
+00000490             182   Ibuffs	ds.l	$40			* start of input buffer
+                     183   Ibuffe
+                     184   						* end of input buffer
+                     185   
+00000590             186   FAC1_m	ds.l	1			* FAC1 mantissa1
+00000594             187   FAC1_e	ds.w	1			* FAC1 exponent
+          0000 0595  188   FAC1_s	EQU	FAC1_e+1		* FAC1 sign (b7)
+00000596             189   		ds.w	1			
+                     190   
+00000598             191   FAC2_m	ds.l	1			* FAC2 mantissa1
+0000059C             192   FAC2_e	ds.l	1			* FAC2 exponent
+          0000 059D  193   FAC2_s	EQU	FAC2_e+1		* FAC2 sign (b7)
+          0000 059E  194   FAC_sc	EQU	FAC2_e+2		* FAC sign comparison, Acc#1 vs #2
+          0000 059F  195   flag		EQU	FAC2_e+3		* flag byte for divide routine
+                     196   
+000005A0             197   PRNlword	ds.l	1			* PRNG seed long word
+                     198   
+000005A4             199   ut1_pl	ds.l	1			* utility pointer 1
+                     200   
+000005A8             201   Asptl		ds.l	1			* array size/pointer
+000005AC             202   Astrtl	ds.l	1			* array start pointer
+                     203   
+          0000 05AC  204   numexp	EQU	Astrtl		* string to float number exponent count
+          0000 05AD  205   expcnt	EQU	Astrtl+1		* string to float exponent count
+                     206   
+          0000 05AF  207   expneg	EQU	Astrtl+3		* string to float eval exponent -ve flag
+                     208   
+000005B0             209   func_l	ds.l	1			* function pointer
+                     210   
+                     211   
+                     212   						* these two need to be a word aligned pair !
+000005B4             213   Defdim	ds.w	1			* default DIM flag
+          0000 05B4  214   cosout	EQU	Defdim		* flag which CORDIC output (re-use byte)
+          0000 05B5  215   Dtypef	EQU	Defdim+1		* data type flag, $80=string, $40=integer, $00=float
+                     216   
+                     217   
+000005B6             218   Binss		ds.l	4			* number to bin string start (32 chrs)
+                     219   
+000005C6             220   Decss		ds.l	1			* number to decimal string start (16 chrs)
+000005CA             221   		ds.w	1			*
+000005CC             222   Usdss		ds.w	1			* unsigned decimal string start (10 chrs)
+                     223   
+000005CE             224   Hexss		ds.l	2			* number to hex string start (8 chrs)
+                     225   
+000005D6             226   BHsend	ds.w	1			* bin/decimal/hex string end
+                     227   
+                     228   
+000005D8             229   prstk		ds.b	1			* stacked function index
+                     230   
+000005D9             231   tpower	ds.b	1			* remember CORDIC power
+                     232   
+000005DA             233   Asrch		ds.b	1			* scan-between-quotes flag, alt search character
+                     234   
+000005DB             235   Dimcnt	ds.b	1			* # of dimensions
+                     236   
+000005DC             237   Breakf	ds.b	1			* break flag, $00=END else=break
+000005DD             238   Oquote	ds.b	1			* open quote flag (Flag: DATA; LIST; memory)
+000005DE             239   Gclctd	ds.b	1			* garbage collected flag
+000005DF             240   Sufnxf	ds.b	1			* subscript/FNX flag, 1xxx xxx = FN(0xxx xxx)
+000005E0             241   Imode		ds.b	1			* input mode flag, $00=INPUT, $98=READ
+                     242   
+000005E1             243   Cflag		ds.b	1			* comparison evaluation flag
+                     244   
+000005E2             245   TabSiz	ds.b	1			* TAB step size
+                     246   
+000005E3             247   comp_f	ds.b	1			* compare function flag, bits 0,1 and 2 used
+                     248   						* bit 2 set if >
+                     249   						* bit 1 set if =
+                     250   						* bit 0 set if <
+                     251   
+000005E4             252   Nullct	ds.b	1			* nulls output after each line
+000005E5             253   TPos		ds.b	1			* BASIC terminal position byte
+000005E6             254   TWidth	ds.b	1			* BASIC terminal width byte
+000005E7             255   Iclim		ds.b	1			* input column limit
+000005E8             256   ccflag	ds.b	1			* CTRL-C check flag
+000005E9             257   ccbyte	ds.b	1			* CTRL-C last received byte
+000005EA             258   ccnull	ds.b	1			* CTRL-C last received byte 'life' timer
+                     259   
+                     260   * these variables for simulator load/save routines
+                     261   
+000005EB             262   file_byte	ds.b	1			* load/save data byte
+000005EC             263   file_id	ds.l	1			* load/save file ID
+                     264   
+                     265   		even			        * dummy even value and zero pad byte
+********  **** ****  Error: Invalid opcode
+                     266   
+                     267   prg_strt
+                     268   
+                     269   * Use these two lines when running from ROM
+          0000 2000  270   ram_addr	EQU	$02000		* RAM start address
+          0000 6000  271   ram_size	EQU	$06000		* RAM size
+                     272   
+                     273   * Use these two lines when running from RAM
+                     274   *ram_addr	EQU	$04000		* RAM start address
+                     275   *ram_size	EQU	$04000		* RAM size
+                     276   							* RAM offset definitions
+                     277   
+                     278   * Use this value to run out of ROM
+0000C000             279   	ORG		$00C000			* past the vectors in a real system
+                     280   * Use this value to run out of RAM
+                     281   *	ORG		$000800			* past the vectors in a real system
+                     282   
+                     283   ;ACIA_1   =      $00010040        * Console ACIA base address
+                     284   
+0000C000  6000 0054  285            BRA    code_start       * For convenience, so you can start from first address
+                     286   
+                     287   *************************************************************************************
+                     288   *
+                     289   * the following code is simulator specific, change to suit your system
+                     290   
+                     291   * output character to the console from register d0.b
+                     292   
+                     293   VEC_OUT
+0000C004  48E7 4080  294           MOVEM.L  A0/D1,-(A7)    * Save working registers
+                     295           LEA.L    ACIA_1,A0      * A0 points to console ACIA
+********  **** ****  Error: Undefined or illegal symbol
+                     296   TXNOTREADY
+0000C00E  1210       297           MOVE.B   (A0),D1        * Read ACIA status
+0000C010  0801 0001  298           BTST     #1,D1          * Test TDRE bit
+0000C014  67F8       299           BEQ.S    TXNOTREADY     * Until ACIA Tx ready
+0000C016  1140 0002  300           MOVE.B   D0,2(A0)       * Write character to send
+0000C01A  4CDF 0102  301           MOVEM.L  (A7)+,A0/D1    * Restore working registers
+0000C01E  4E75       302           RTS
+                     303   
+                     304   *************************************************************************************
+                     305   *
+                     306   * input a character from the console into register d0
+                     307   * else return Cb=0 if there's no character available
+                     308   
+                     309   VEC_IN
+0000C020  48E7 4080  310           MOVEM.L  A0/D1,-(A7)    * Save working registers
+                     311           LEA.L    ACIA_1,A0      * A0 points to console ACIA
+********  **** ****  Error: Undefined or illegal symbol
+0000C02A  1210       312           MOVE.B   (A0),D1        * Read ACIA status
+0000C02C  0801 0000  313           BTST     #0,D1          * Test RDRF bit
+0000C030  670E       314           BEQ.S    RXNOTREADY     * Branch If ACIA Rx not ready
+0000C032  1028 0002  315           MOVE.B   2(A0),D0       * Read character received
+0000C036  4CDF 0102  316           MOVEM.L  (A7)+,A0/D1    * Restore working registers
+0000C03A  003C 0001  317   	ORI.b	 #1,CCR	        * Set the carry, flag we got a byte
+0000C03E  4E75       318           RTS                     * Return
+                     319   RXNOTREADY:
+0000C040  4CDF 0102  320           MOVEM.L  (A7)+,A0/D1    * Restore working registers
+0000C044  023C 00FE  321   	ANDI.b	#$FE,CCR	* Clear the carry, flag character available
+0000C048  4E75       322   	RTS
+                     323   
+                     324   *************************************************************************************
+                     325   *
+                     326   * LOAD routine for the TS2 computer (not implemented)
+                     327   
+                     328   VEC_LD
+0000C04A  7E2E       329   	MOVEQ		#$2E,d7			        * error code $2E "Not implemented" error
+                     330   	BRA		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     331   
+                     332   *************************************************************************************
+                     333   *
+                     334   * SAVE routine for the TS2 computer (not implemented)
+                     335   
+                     336   VEC_SV
+0000C050  7E2E       337   	MOVEQ		#$2E,d7			        * error code $2E "Not implemented" error
+                     338   	BRA		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     339   
+                     340   *************************************************************************************
+                     341   *
+                     342   * turn off simulator key echo
+                     343   
+                     344   code_start
+                     345                                   * Set up ACIA parameters
+                     346           LEA.L   ACIA_1,A0       * A0 points to console ACIA
+********  **** ****  Error: Undefined or illegal symbol
+0000C05C  10BC 0015  347           MOVE.B  #$15,(A0)       * Set up ACIA1 constants (no IRQ,
+                     348                                   * RTS* low, 8 bit, no parity, 1 stop)
+                     349   
+                     350   * to tell EhBASIC where and how much RAM it has pass the address in a0 and the size
+                     351   * in d0. these values are at the end of the .inc file
+                     352   
+0000C060  207C 0000  353   	MOVEA.l	#ram_addr,a0		* tell BASIC where RAM starts
+0000C064  2000      
+0000C066  203C 0000  354   	MOVE.l	#ram_size,d0		* tell BASIC how big RAM is
+0000C06A  6000      
+                     355   
+                     356   * end of simulator specific code
+                     357   
+                     358   
+                     359   ****************************************************************************************
+                     360   ****************************************************************************************
+                     361   ****************************************************************************************
+                     362   ****************************************************************************************
+                     363   *
+                     364   * Register use :- (must improve this !!)
+                     365   *
+                     366   *	a6 -	temp Bpntr				* temporary BASIC execute pointer
+                     367   *	a5 -	Bpntr					* BASIC execute (get byte) pointer
+                     368   *	a4 -	des_sk				        * descriptor stack pointer
+                     369   *	a3 -	ram_strt				* start of RAM. all RAM references are offsets
+                     370   *							* from this value
+                     371   *
+                     372   
+                     373   *************************************************************************************
+                     374   *
+                     375   * BASIC cold start entry point. assume entry with RAM address in a0 and RAM length
+                     376   * in d0
+                     377   
+                     378   LAB_COLD
+0000C06C  0C80 0000  379   	CMP.l		#$4000,d0			* compare size with 16k
+0000C070  4000      
+0000C072  6C08       380   	BGE.s		LAB_sizok			* branch if >= 16k
+                     381   
+0000C074  7005       382   	MOVEQ		#5,d0				* error 5 - not enough RAM
+0000C076  1E3C 00E4  383           move.b          #228,D7                         * Go to TUTOR function
+0000C07A  4E4E       384           trap            #14                             * Call TRAP14 handler
+                     385   
+                     386   LAB_sizok
+0000C07C  2648       387   	MOVEA.l	a0,a3				* copy RAM base to a3
+0000C07E  D1C0       388   	ADDA.l	d0,a0				* a0 is top of RAM
+0000C080  2748 044A  389   	MOVE.l	a0,Ememl(a3)		* set end of mem
+0000C084  4FEB 0400  390   	LEA		ram_base(a3),sp		* set stack to RAM start + 1k
+                     391   
+0000C088  303C 4EF9  392   	MOVE.w	#$4EF9,d0			* JMP opcode
+0000C08C  204F       393   	MOVEA.l	sp,a0				* point to start of vector table
+                     394   
+0000C08E  30C0       395   	MOVE.w	d0,(a0)+			* LAB_WARM
+0000C090  43FA FFDA  396   	LEA		LAB_COLD(pc),a1		* initial warm start vector
+0000C094  20C9       397   	MOVE.l	a1,(a0)+			* set vector
+                     398   
+0000C096  30C0       399   	MOVE.w	d0,(a0)+			* Usrjmp
+                     400   	LEA		LAB_FCER(pc),a1		* initial user function vector
+********  **** ****  Error: Undefined or illegal symbol
+                     401   							* "Function call" error
+0000C09C  20C9       402   	MOVE.l	a1,(a0)+			* set vector
+                     403   
+0000C09E  30C0       404   	MOVE.w	d0,(a0)+			* V_INPT JMP opcode
+0000C0A0  43FA FF7E  405   	LEA		VEC_IN(pc),a1		* get byte from input device vector
+0000C0A4  20C9       406   	MOVE.l	a1,(a0)+			* set vector
+                     407   
+0000C0A6  30C0       408   	MOVE.w	d0,(a0)+			* V_OUTP JMP opcode
+0000C0A8  43FA FF5A  409   	LEA		VEC_OUT(pc),a1		* send byte to output device vector
+0000C0AC  20C9       410   	MOVE.l	a1,(a0)+			* set vector
+                     411   
+0000C0AE  30C0       412   	MOVE.w	d0,(a0)+			* V_LOAD JMP opcode
+0000C0B0  43FA FF98  413   	LEA		VEC_LD(pc),a1		* load BASIC program vector
+0000C0B4  20C9       414   	MOVE.l	a1,(a0)+			* set vector
+                     415   
+0000C0B6  30C0       416   	MOVE.w	d0,(a0)+			* V_SAVE JMP opcode
+0000C0B8  43FA FF96  417   	LEA		VEC_SV(pc),a1		* save BASIC program vector
+0000C0BC  20C9       418   	MOVE.l	a1,(a0)+			* set vector
+                     419   
+0000C0BE  30C0       420   	MOVE.w	d0,(a0)+			* V_CTLC JMP opcode
+                     421   	LEA		VEC_CC(pc),a1		* save CTRL-C check vector
+********  **** ****  Error: Undefined or illegal symbol
+0000C0C4  20C9       422   	MOVE.l	a1,(a0)+			* set vector
+                     423   
+                     424   * set-up start values
+                     425   
+                     426   *##LAB_GMEM
+0000C0C6  7000       427   	MOVEQ		#$00,d0			* clear d0
+0000C0C8  1740 05E4  428   	MOVE.b	d0,Nullct(a3)		* default NULL count
+0000C0CC  1740 05E5  429   	MOVE.b	d0,TPos(a3)			* clear terminal position
+0000C0D0  1740 05E8  430   	MOVE.b	d0,ccflag(a3)		* allow CTRL-C check
+0000C0D4  3740 05EE  431   	MOVE.w	d0,prg_strt-2(a3)		* clear start word
+0000C0D8  3740 05D6  432   	MOVE.w	d0,BHsend(a3)		* clear value to string end word
+                     433   
+0000C0DC  177C 0050  434   	MOVE.b	#$50,TWidth(a3)		* default terminal width byte for simulator
+0000C0E0  05E6      
+0000C0E2  177C 000E  435   	MOVE.b	#$0E,TabSiz(a3)		* save default tab size = 14
+0000C0E6  05E2      
+                     436   
+0000C0E8  177C 0038  437   	MOVE.b	#$38,Iclim(a3)		* default limit for TAB = 14 for simulator
+0000C0EC  05E7      
+                     438   
+0000C0EE  49EB 048E  439   	LEA		des_sk(a3),a4		* set descriptor stack start
+                     440   
+0000C0F2  41EB 05F0  441   	LEA		prg_strt(a3),a0		* get start of mem
+0000C0F6  2748 042E  442   	MOVE.l	a0,Smeml(a3)		* save start of mem
+                     443   
+                     444   	BSR		LAB_1463			* do "NEW" and "CLEAR"
+********  **** ****  Error: Undefined or illegal symbol
+                     445   	BSR		LAB_CRLF			* print CR/LF
+********  **** ****  Error: Undefined or illegal symbol
+0000C102  202B 044A  446   	MOVE.l	Ememl(a3),d0		* get end of mem
+0000C106  90AB 042E  447   	SUB.l		Smeml(a3),d0		* subtract start of mem
+                     448   
+                     449   	BSR		LAB_295E			* print d0 as unsigned integer (bytes free)
+********  **** ****  Error: Undefined or illegal symbol
+                     450   	LEA		LAB_SMSG(pc),a0		* point to start message
+********  **** ****  Error: Undefined or illegal symbol
+                     451   	BSR		LAB_18C3			* print null terminated string from memory
+********  **** ****  Error: Undefined or illegal symbol
+                     452   
+                     453   	LEA		LAB_RSED(pc),a0		* get pointer to value
+********  **** ****  Error: Undefined or illegal symbol
+                     454   	BSR		LAB_UFAC			* unpack memory (a0) into FAC1
+********  **** ****  Error: Undefined or illegal symbol
+                     455   
+                     456   	LEA		LAB_1274(pc),a0		* get warm start vector
+********  **** ****  Error: Undefined or illegal symbol
+0000C122  2748 0402  457   	MOVE.l	a0,Wrmjpv(a3)		* set warm start vector
+                     458   	BSR		LAB_RND			* initialise
+********  **** ****  Error: Undefined or illegal symbol
+0000C12A  4EEB 0400  459   	JMP		LAB_WARM(a3)		* go do warm start
+                     460   
+                     461   
+                     462   *************************************************************************************
+                     463   *
+                     464   * do format error
+                     465   
+                     466   LAB_FOER
+0000C12E  7E2C       467   	MOVEQ		#$2C,d7			* error code $2C "Format" error
+                     468   	BRA.s		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     469   
+                     470   
+                     471   *************************************************************************************
+                     472   *
+                     473   * do address error
+                     474   
+                     475   LAB_ADER
+0000C132  7E2A       476   	MOVEQ		#$2A,d7			* error code $2A "Address" error
+                     477   	BRA.s		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     478   
+                     479   
+                     480   *************************************************************************************
+                     481   *
+                     482   * do wrong dimensions error
+                     483   
+                     484   LAB_WDER
+0000C136  7E28       485   	MOVEQ		#$28,d7			* error code $28 "Wrong dimensions" error
+                     486   	BRA.s		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     487   
+                     488   
+                     489   *************************************************************************************
+                     490   *
+                     491   * do undimensioned array error
+                     492   
+                     493   LAB_UDER
+0000C13A  7E26       494   	MOVEQ		#$26,d7			* error code $26 "undimensioned array" error
+                     495   	BRA.s		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     496   
+                     497   
+                     498   *************************************************************************************
+                     499   *
+                     500   * do undefined variable error
+                     501   
+                     502   LAB_UVER
+                     503   
+                     504   * if you do want a non existant variable to return an error then leave the novar
+                     505   * value at the top of this file set to zero
+                     506   
+                     506   
+0000C13E  7E24       507   	MOVEQ		#$24,d7			* error code $24 "undefined variable" error
+                     508   	BRA.s		LAB_XERR			* do error #d7, then warm start
+********  **** ****  Error: Undefined or illegal symbol
+                     509   
+                     510    endc
+********  **** ****  Error: Invalid opcode
+                     511   
+                     512   * if you want a non existant variable to return a null value then set the novar
+                     513   * value at the top of this file to some non zero value
+                     514   
+          0000 0000
+
+Assembly errors: 23
